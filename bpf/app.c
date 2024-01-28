@@ -113,7 +113,6 @@ int xdp_load_balancer(struct xdp_md *ctx)
 	// Traffic from clients
 	if (tcp->dest == bpf_ntohs(port))
 	{
-		bpf_printk("Traffic from client");
 		struct server_cfg *be_cfg;
 		struct server_cfg *client = bpf_map_lookup_elem(&clients_map, &tcp->source);
 		// Add a new client
