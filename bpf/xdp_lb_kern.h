@@ -27,3 +27,11 @@ iph_csum(struct iphdr *iph)
     unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)iph, sizeof(struct iphdr), 0);
     return csum_fold_helper(csum);
 }
+
+static __always_inline __u16
+tcp_csum(struct tcphdr *tcp)
+{
+    tcp->check = 0;
+    unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)tcp, sizeof(struct tcphdr), 0);
+    return csum_fold_helper(csum);
+}

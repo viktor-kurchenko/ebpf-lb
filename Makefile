@@ -2,6 +2,7 @@ TARGET = bpf/app
 BPF_APP = xdp_lb
 # INTERFACE = wlp1s0
 # INTERFACE = lo
+# INTERFACE = docker0
 INTERFACE = virbr0
 
 BPF_C = ${TARGET:=.c}
@@ -13,10 +14,12 @@ build: clean
 		  -c $(BPF_C) \
 		  -I/usr/include \
 		  -o $(BPF_OBJ)
+	go generate
 
 clean:
 	rm -f $(BPF_OBJ)
 	rm -f ${BPF_OBJ:.o=.ll}
+	rm -f bpf_bpf*
 
 attach: detach
 	sudo bpftool prog load $(BPF_OBJ) /sys/fs/bpf/$(BPF_APP)
@@ -34,3 +37,10 @@ tcp-echo:
 
 udp-echo:
 	ncat -l 8080 --keep-open --udp --exec "/bin/cat"
+
+run: build
+	sudo go run . $(INTERFACE)
+
+# server-1: docker run --rm -it -e TCP_PORT=8001 -e NODE_NAME="EchoNode" -p 8001:8001 cjimti/go-echo
+# server-2: docker run --rm -it -e TCP_PORT=8002 -e NODE_NAME="EchoNode" -p 8002:8002 cjimti/go-echo
+# client: docker run --rm -it nicolaka/netshoot /bin/bash
