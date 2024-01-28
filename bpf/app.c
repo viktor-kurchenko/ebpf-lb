@@ -95,7 +95,8 @@ int xdp_load_balancer(struct xdp_md *ctx)
 
 	struct tcphdr *tcp = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
 
-	if (tcp->source != bpf_ntohs(port) && tcp->dest != bpf_ntohs(port))
+	__be16 *be_idx = bpf_map_lookup_elem(&client_port_be_map, &tcp->dest); // if traffic source is backend
+	if (tcp->dest != bpf_ntohs(port) && be_idx == NULL)
 	{
 		bpf_printk("INFO: TCP segment port mistmatch, skipping [s: %d, d: %d]...", tcp->source, tcp->dest);
 		return XDP_PASS;
@@ -112,6 +113,7 @@ int xdp_load_balancer(struct xdp_md *ctx)
 	// Traffic from clients
 	if (tcp->dest == bpf_ntohs(port))
 	{
+		bpf_printk("Traffic from client");
 		struct server_cfg *be_cfg;
 		struct server_cfg *client = bpf_map_lookup_elem(&clients_map, &tcp->source);
 		// Add a new client
@@ -165,7 +167,8 @@ int xdp_load_balancer(struct xdp_md *ctx)
 			}
 		}
 
-		// Update destination IP and MAC
+		// Update destination Port, IP and MAC
+		tcp->dest = bpf_ntohs(be_cfg->port);
 		ip->daddr = be_cfg->ip;
 		eth->h_dest[0] = be_cfg->mac[0]; // TODO: can we simplify this assignment?
 		eth->h_dest[1] = be_cfg->mac[1];
@@ -175,7 +178,7 @@ int xdp_load_balancer(struct xdp_md *ctx)
 		eth->h_dest[5] = be_cfg->mac[5];
 	}
 	// Traffic from backends
-	else if (tcp->source == bpf_ntohs(port))
+	else
 	{
 		// 1. Lookup client by port
 		// 2. Update destination IP and MAC
@@ -187,6 +190,7 @@ int xdp_load_balancer(struct xdp_md *ctx)
 		}
 
 		// Update destination IP and MAC
+		tcp->source = bpf_ntohs(port);
 		ip->daddr = client->ip;
 		eth->h_dest[0] = client->mac[0]; // TODO: can we simplify this assignment?
 		eth->h_dest[1] = client->mac[1];
@@ -194,10 +198,6 @@ int xdp_load_balancer(struct xdp_md *ctx)
 		eth->h_dest[3] = client->mac[3];
 		eth->h_dest[4] = client->mac[4];
 		eth->h_dest[5] = client->mac[5];
-	}
-	else
-	{
-		return XDP_PASS;
 	}
 
 	ip->saddr = lb_cfg->ip;
