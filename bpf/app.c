@@ -3,7 +3,7 @@
 #include "xdp_lb_kern.h"
 
 #define BE_MAX_ENTRIES 8
-#define CLIENT_MAX_ENTRIES 8
+#define CLIENT_MAX_ENTRIES 32
 
 struct lb_cfg
 {

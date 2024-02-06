@@ -1,9 +1,8 @@
 TARGET = bpf/app
 BPF_APP = xdp_lb
-# INTERFACE = wlp1s0
-# INTERFACE = lo
-# INTERFACE = docker0
-INTERFACE = virbr0
+INTERFACE = docker0
+
+BE_PORT = 8000
 
 BPF_C = ${TARGET:=.c}
 BPF_OBJ = ${BPF_C:.c=.o}
@@ -32,15 +31,19 @@ detach:
 trace:
 	sudo cat /sys/kernel/debug/tracing/trace_pipe
 
-tcp-echo:
-	ncat -l 8080 --keep-open --exec "/bin/cat"
-
-udp-echo:
-	ncat -l 8080 --keep-open --udp --exec "/bin/cat"
-
 run: build
 	sudo go run . $(INTERFACE)
 
-# server-1: docker run --rm -it -e TCP_PORT=8001 -e NODE_NAME="EchoNode" -p 8001:8001 cjimti/go-echo
-# server-2: docker run --rm -it -e TCP_PORT=8002 -e NODE_NAME="EchoNode" -p 8002:8002 cjimti/go-echo
-# client: docker run --rm -it nicolaka/netshoot /bin/bash
+infra-run:
+	echo "Starting BE-1 ..."
+	docker run -e HTTP_PORT=$(BE_PORT) -h be-1 --name be-1 --rm -d -t mendhak/http-https-echo:31
+	BE1_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' be-1)
+	echo "Starting BE-2 ..."
+	docker run -e HTTP_PORT=$(BE_PORT) -h be-2 --name be-2 --rm -d -t mendhak/http-https-echo:31
+	BE2_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' be-2)
+	echo "Starting clients ..."
+	docker run --name cl-1 --rm -d -it nicolaka/netshoot /bin/bash
+	docker run --name cl-2 --rm -d -it nicolaka/netshoot /bin/bash
+
+infra-stop:
+	docker stop be-1 be-2 cl-1 cl-2 || true

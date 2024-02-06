@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v2"
 
 	"github.com/cilium/ebpf/link"
+	"github.com/mdlayher/arp"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go bpf bpf/app.c -- -I../headers
@@ -42,16 +44,20 @@ func main() {
 		log.Fatalf("Please specify a network interface")
 	}
 
-	config, err := configFromFile()
-	if err != nil {
-		log.Fatalf("failed to load config: %s", err)
-	}
-
 	ifaceName := os.Args[1]
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		log.Fatalf("failed to lookup network iface %q: %s", ifaceName, err)
 	}
+
+	config, err := configFromFile(iface)
+	if err != nil {
+		log.Fatalf("failed to load config: %s", err)
+	}
+
+	verifyLBIP(iface, config.LoadBalancer.IP)
+	constantsMap[lbPortConstName] = config.LoadBalancer.Port
+	populateBeMACs(iface, &config)
 
 	objs := bpfObjects{}
 	defer objs.Close()
@@ -82,14 +88,14 @@ func main() {
 	log.Printf("Attached XDP program to iface %q (index %d)", iface.Name, iface.Index)
 	log.Printf("Press Ctrl-C to exit and remove the program")
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		fmt.Printf("Working...\n")
+		printStat(&objs)
 	}
 }
 
-func configFromFile() (config, error) {
+func configFromFile(iface *net.Interface) (config, error) {
 	cfg, err := os.ReadFile(configFileName)
 	if err != nil {
 		return config{}, fmt.Errorf("failed to load config from file: %s", err)
@@ -98,8 +104,40 @@ func configFromFile() (config, error) {
 	if err := yaml.Unmarshal(cfg, &config); err != nil {
 		return config, fmt.Errorf("failed to unmarshal config: %s", err)
 	}
-	constantsMap[lbPortConstName] = config.LoadBalancer.Port
 	return config, nil
+}
+
+func verifyLBIP(iface *net.Interface, ip netip.Addr) error {
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return err
+	}
+	for i := range addresses {
+		ifIP := addresses[i].(*net.IPNet).IP.String()
+		if ifIP == ip.String() {
+			return nil
+		}
+	}
+	return fmt.Errorf("LB IP [%s] doesn't match network interface", ip)
+}
+
+func populateBeMACs(iface *net.Interface, config *config) error {
+	config.LoadBalancer.MAC = iface.HardwareAddr.String()
+
+	c, err := arp.Dial(iface)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+
+	for i := range config.Backends {
+		mac, err := c.Resolve(config.Backends[i].IP)
+		if err != nil {
+			return err
+		}
+		config.Backends[i].MAC = mac.String()
+	}
+	return nil
 }
 
 func mustParseMAC(addr string) net.HardwareAddr {
@@ -112,7 +150,7 @@ func mustParseMAC(addr string) net.HardwareAddr {
 
 func loadConfigInKernel(cfg config, objs *bpfObjects) error {
 	lb := bpfLbCfg{
-		Ip:      binary.LittleEndian.Uint32(cfg.LoadBalancer.IP.AsSlice()),
+		Ip:      binary.LittleEndian.Uint32(cfg.LoadBalancer.IP.AsSlice()), //TODO: is it platform specific?
 		Port:    cfg.LoadBalancer.Port,
 		Mac:     [6]uint8(mustParseMAC(cfg.LoadBalancer.MAC)),
 		BeCount: uint16(len(cfg.Backends)),
@@ -132,4 +170,21 @@ func loadConfigInKernel(cfg config, objs *bpfObjects) error {
 		}
 	}
 	return nil
+}
+
+func printStat(objs *bpfObjects) {
+	iterator := objs.ClientsMap.Iterate()
+	stats := strings.Builder{}
+	var clientPort uint16
+	var clientCfg bpfServerCfg
+	for iterator.Next(&clientPort, &clientCfg) {
+		var beIndex uint16
+		objs.ClientPortBeMap.Lookup(&clientPort, &beIndex)
+		var beCfg bpfServerCfg
+		objs.BeCfgMap.Lookup(&beIndex, &beCfg)
+		stats.WriteString(fmt.Sprintf("[%s] %s:%d -[%d]-> %s:%d [%s]\n",
+			mac2String(clientCfg.Mac), ipFromInt(clientCfg.Ip), clientPort,
+			beIndex, ipFromInt(beCfg.Ip), beCfg.Port, mac2String(beCfg.Mac)))
+	}
+	fmt.Printf("Stats:\n%s\n", stats.String())
 }
