@@ -13,8 +13,8 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/cilium/ebpf/link"
-	"github.com/mdlayher/arp"
 	"github.com/gavv/monotime"
+	"github.com/mdlayher/arp"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go bpf bpf/app.c -- -I../headers
@@ -75,6 +75,10 @@ func main() {
 
 	if err := loadConfigInKernel(config, &objs); err != nil {
 		log.Fatalf("failed to load config: %s", err)
+	}
+
+	if err := fillPortsMap(&objs); err != nil {
+		log.Fatalf("failed to fill ports map: %s", err)
 	}
 
 	l, err := link.AttachXDP(link.XDPOptions{
@@ -168,6 +172,16 @@ func loadConfigInKernel(cfg config, objs *bpfObjects) error {
 		}
 		if err := objs.BeCfgMap.Put(uint16(i), beCfg); err != nil {
 			return fmt.Errorf("failed to put BE config in the map: %s", err)
+		}
+	}
+	return nil
+}
+
+func fillPortsMap(objs *bpfObjects) error {
+	for i := 1024; i <= 65535; i++ {
+		p := uint16(i)
+		if err := objs.Ports.Put(nil, &p); err != nil {
+			return err
 		}
 	}
 	return nil

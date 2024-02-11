@@ -3,7 +3,14 @@
 #include "xdp_lb_kern.h"
 
 #define BE_MAX_ENTRIES 8
-#define CLIENT_MAX_ENTRIES 50000
+#define CLIENT_MAX_ENTRIES 64512 // < 1023 and <= 65535 (65535 - 1023 = 64512)
+
+struct
+{
+	__uint(type, BPF_MAP_TYPE_STACK);
+	__uint(max_entries, CLIENT_MAX_ENTRIES);
+	__type(value, __be16);
+} ports SEC(".maps");
 
 struct lb_cfg
 {
@@ -97,7 +104,7 @@ volatile const __u16 port;
 static __always_inline int
 process_client_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, struct lb_cfg *lb_cfg)
 {
-	//TODO: remove it!
+	// TODO: remove it!
 	bpf_printk("Client TCP [%d / %d] bits: syn: %d, ack: %d, fin: %d, rst: %d", bpf_ntohs(tcp->seq), bpf_ntohs(tcp->ack_seq), tcp->syn, tcp->ack, tcp->fin, tcp->rst);
 	struct server_cfg *be_cfg;
 	struct server_cfg *client = bpf_map_lookup_elem(&clients_map, &tcp->source);
@@ -176,7 +183,7 @@ process_client_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp,
 static __always_inline int
 process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 {
-	//TODO: remove it!
+	// TODO: remove it!
 	bpf_printk("Client TCP [%d / %d] bits: syn: %d, ack: %d, fin: %d, rst: %d", bpf_ntohs(tcp->seq), bpf_ntohs(tcp->ack_seq), tcp->syn, tcp->ack, tcp->fin, tcp->rst);
 	struct conn_track ct = {
 		.ts = bpf_ktime_get_ns(),
