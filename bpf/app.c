@@ -97,6 +97,7 @@ volatile const __u16 port;
 static __always_inline int
 process_client_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, struct lb_cfg *lb_cfg)
 {
+	//TODO: remove it!
 	bpf_printk("Client TCP [%d / %d] bits: syn: %d, ack: %d, fin: %d, rst: %d", bpf_ntohs(tcp->seq), bpf_ntohs(tcp->ack_seq), tcp->syn, tcp->ack, tcp->fin, tcp->rst);
 	struct server_cfg *be_cfg;
 	struct server_cfg *client = bpf_map_lookup_elem(&clients_map, &tcp->source);
@@ -136,7 +137,6 @@ process_client_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp,
 	// Lookup backend config for existing client
 	else
 	{
-		bpf_printk("BE TCP [%d / %d] bits: syn: %d, ack: %d, fin: %d, rst: %d", bpf_ntohs(tcp->seq), bpf_ntohs(tcp->ack_seq), tcp->syn, tcp->ack, tcp->fin, tcp->rst);
 		__be16 *be_idx = bpf_map_lookup_elem(&client_port_be_map, &client->port);
 		if (be_idx == NULL)
 		{
@@ -176,6 +176,7 @@ process_client_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp,
 static __always_inline int
 process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 {
+	//TODO: remove it!
 	bpf_printk("Client TCP [%d / %d] bits: syn: %d, ack: %d, fin: %d, rst: %d", bpf_ntohs(tcp->seq), bpf_ntohs(tcp->ack_seq), tcp->syn, tcp->ack, tcp->fin, tcp->rst);
 	struct conn_track ct = {
 		.ts = bpf_ktime_get_ns(),
