@@ -5,6 +5,7 @@ go 1.21.4
 require github.com/cilium/ebpf v0.12.3
 
 require (
+	github.com/gavv/monotime v0.0.0-20190418164738-30dba4353424 // indirect
 	github.com/josharian/native v1.0.0 // indirect
 	github.com/mdlayher/arp v0.0.0-20220512170110-6706a2966875 // indirect
 	github.com/mdlayher/ethernet v0.0.0-20220221185849-529eae5b6118 // indirect

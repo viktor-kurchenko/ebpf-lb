@@ -14,6 +14,7 @@ import (
 
 	"github.com/cilium/ebpf/link"
 	"github.com/mdlayher/arp"
+	"github.com/gavv/monotime"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go bpf bpf/app.c -- -I../headers
@@ -182,9 +183,13 @@ func printStat(objs *bpfObjects) {
 		objs.ClientPortBeMap.Lookup(&clientPort, &beIndex)
 		var beCfg bpfServerCfg
 		objs.BeCfgMap.Lookup(&beIndex, &beCfg)
-		stats.WriteString(fmt.Sprintf("[%s] %s:%d -[%d]-> %s:%d [%s]\n",
+		var connTrack bpfConnTrack
+		objs.PortConnTrackMap.Lookup(&clientPort, &connTrack)
+
+		connDuration := time.Duration(monotime.Now().Nanoseconds() - connTrack.Ts).Round(time.Second)
+		stats.WriteString(fmt.Sprintf("[%s] %s:%d -[%d]-> %s:%d [%s] [last activity: %s]\n",
 			mac2String(clientCfg.Mac), ipFromInt(clientCfg.Ip), clientPort,
-			beIndex, ipFromInt(beCfg.Ip), beCfg.Port, mac2String(beCfg.Mac)))
+			beIndex, ipFromInt(beCfg.Ip), beCfg.Port, mac2String(beCfg.Mac), connDuration))
 	}
 	fmt.Printf("Stats:\n%s\n", stats.String())
 }
