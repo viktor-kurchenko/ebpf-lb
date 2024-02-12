@@ -116,6 +116,10 @@ cleanup_port_mappings(__be16 port)
 	{
 		bpf_printk("FATAL: failed to cleanup port -> client tupple mapping!");
 	}
+	if (bpf_map_delete_elem(&port_be_cfg_map, &port) != 0)
+	{
+		bpf_printk("FATAL: failed to cleanup port -> be config mapping!");
+	}
 	if (bpf_map_delete_elem(&port_conn_track_map, &port) != 0)
 	{
 		bpf_printk("FATAL: failed to cleanup port -> conn track mapping!");
@@ -200,17 +204,26 @@ process_existing_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp
 		push_back_port(cport);
 		return -1;
 	}
-	conn->ts = bpf_ktime_get_ns();
-	if (conn->client_fin == 0)
+	else if (conn->be_fin == 1 && conn->client_fin == 1 && tcp->ack == 1)
 	{
-		conn->client_fin = tcp->fin;
-	}
-	if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
-	{
-		bpf_printk("FATAL: failed to update conn track for existing client by client port!");
+		bpf_printk("INFO: session finished!");
 		cleanup_port_mappings(cport);
 		push_back_port(cport);
-		return -1;
+	}
+	else
+	{
+		conn->ts = bpf_ktime_get_ns();
+		if (conn->client_fin == 0)
+		{
+			conn->client_fin = tcp->fin;
+		}
+		if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
+		{
+			bpf_printk("FATAL: failed to update conn track for existing client by client port!");
+			cleanup_port_mappings(cport);
+			push_back_port(cport);
+			return -1;
+		}
 	}
 	// Update source/destination Port, IP and MAC
 	tcp->source = bpf_ntohs(cport);
@@ -243,17 +256,26 @@ process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 		push_back_port(cport);
 		return -1;
 	}
-	conn->ts = bpf_ktime_get_ns();
-	if (conn->be_fin == 0)
+	else if (conn->be_fin == 1 && conn->client_fin == 1 && tcp->ack == 1)
 	{
-		conn->be_fin = tcp->fin;
-	}
-	if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
-	{
-		bpf_printk("FATAL: failed to update conn track mapping by destination port!");
+		bpf_printk("INFO: session finished!");
 		cleanup_port_mappings(cport);
 		push_back_port(cport);
-		return -1;
+	}
+	else
+	{
+		conn->ts = bpf_ktime_get_ns();
+		if (conn->be_fin == 0)
+		{
+			conn->be_fin = tcp->fin;
+		}
+		if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
+		{
+			bpf_printk("FATAL: failed to update conn track mapping by destination port!");
+			cleanup_port_mappings(cport);
+			push_back_port(cport);
+			return -1;
+		}
 	}
 
 	// Update destination IP and MAC
