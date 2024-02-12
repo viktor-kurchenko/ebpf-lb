@@ -188,22 +188,20 @@ func fillPortsMap(objs *bpfObjects) error {
 }
 
 func printStat(objs *bpfObjects) {
-	iterator := objs.ClientsMap.Iterate()
+	iterator := objs.ClientTupplePortMap.Iterate()
 	stats := strings.Builder{}
 	var clientPort uint16
-	var clientCfg bpfServerCfg
-	for iterator.Next(&clientPort, &clientCfg) {
-		var beIndex uint16
-		objs.ClientPortBeMap.Lookup(&clientPort, &beIndex)
+	var clientTupple bpfClientTupple
+	for iterator.Next(&clientTupple, &clientPort) {
 		var beCfg bpfServerCfg
-		objs.BeCfgMap.Lookup(&beIndex, &beCfg)
+		objs.PortBeCfgMap.Lookup(&clientPort, &beCfg)
 		var connTrack bpfConnTrack
 		objs.PortConnTrackMap.Lookup(&clientPort, &connTrack)
 
 		connDuration := time.Duration(monotime.Now().Nanoseconds() - connTrack.Ts).Round(time.Second)
-		stats.WriteString(fmt.Sprintf("[%s] %s:%d -[%d]-> %s:%d [%s] [last activity: %s]\n",
-			mac2String(clientCfg.Mac), ipFromInt(clientCfg.Ip), clientPort,
-			beIndex, ipFromInt(beCfg.Ip), beCfg.Port, mac2String(beCfg.Mac), connDuration))
+		stats.WriteString(fmt.Sprintf("[%s] %s:%d ---> %s:%d [%s] [last activity: %s]\n",
+			mac2String(clientTupple.Mac), ipFromInt(clientTupple.Ip), clientPort,
+			ipFromInt(beCfg.Ip), beCfg.Port, mac2String(beCfg.Mac), connDuration))
 	}
 	fmt.Printf("Stats:\n%s\n", stats.String())
 }

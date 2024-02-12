@@ -28,6 +28,29 @@ struct
 	__type(value, struct lb_cfg);
 } lb_cfg_map SEC(".maps");
 
+struct client_tupple
+{
+	__be32 ip;
+	__be16 port;
+	unsigned char mac[ETH_ALEN];
+};
+
+struct
+{
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, CLIENT_MAX_ENTRIES);
+	__type(key, struct client_tupple); // unique client tuple
+	__type(value, __be16);			   // unique port
+} client_tupple_port_map SEC(".maps");
+
+struct
+{
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, CLIENT_MAX_ENTRIES);
+	__type(key, __be16);				 // unique port
+	__type(value, struct client_tupple); // unique client tuple
+} port_client_tupple_map SEC(".maps");
+
 struct server_cfg
 {
 	__be32 ip;
@@ -47,25 +70,9 @@ struct
 {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, CLIENT_MAX_ENTRIES);
-	__type(key, struct server_cfg); // unique client tuple
-	__type(value, __be16);			// unique port
-} client_port_map SEC(".maps");
-
-struct
-{
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, CLIENT_MAX_ENTRIES);
 	__type(key, __be16);			  // unique port
-	__type(value, struct server_cfg); // unique client tuple
-} port_client_map SEC(".maps");
-
-struct
-{
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, CLIENT_MAX_ENTRIES);
-	__type(key, __be16);   // unique port
-	__type(value, __be16); // backend index
-} port_be_index_map SEC(".maps");
+	__type(value, struct server_cfg); // backend config
+} port_be_cfg_map SEC(".maps");
 
 struct conn_track
 {
@@ -82,101 +89,134 @@ struct
 	__type(value, struct conn_track); // connection track stats
 } port_conn_track_map SEC(".maps");
 
-struct
-{
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, CLIENT_MAX_ENTRIES);
-	__type(key, __be16);			  // client port (must be unique)
-	__type(value, struct server_cfg); // client properties
-} clients_map SEC(".maps");
-
-struct
-{
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, CLIENT_MAX_ENTRIES);
-	__type(key, __be16);   // client port
-	__type(value, __be16); // backend index -> be_cfg_map
-} client_port_be_map SEC(".maps");
-
 volatile const __u16 lb_cfg_key;
 volatile const __u16 port;
 
-static __always_inline int
-process_client_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, struct lb_cfg *lb_cfg)
+static __always_inline void
+push_back_port(__be16 port)
 {
-	// TODO: remove it!
-	bpf_printk("Client TCP [%d / %d] bits: syn: %d, ack: %d, fin: %d, rst: %d", bpf_ntohs(tcp->seq), bpf_ntohs(tcp->ack_seq), tcp->syn, tcp->ack, tcp->fin, tcp->rst);
-	struct server_cfg *be_cfg;
-	struct server_cfg *client = bpf_map_lookup_elem(&clients_map, &tcp->source);
-	// Add a new client
-	if (client == NULL)
+	if (bpf_map_push_elem(&ports, &port, BPF_ANY) != 0)
 	{
-		// Lookup backend for a new client
-		__be16 be_idx = bpf_ktime_get_ns() % lb_cfg->be_count;
-		be_cfg = bpf_map_lookup_elem(&be_cfg_map, &be_idx);
-		if (be_cfg == NULL)
-		{
-			bpf_printk("FATAL: backend config not found [index: %d]!", be_idx);
-			return -1;
-		}
+		bpf_printk("FATAL: failed to push back new port!");
+	}
+}
 
-		struct server_cfg new_client = {
-			// TODO: can we avoid this var?
-			.port = tcp->source,
-			.ip = ip->saddr,
-			.mac = {eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]},
-		};
-		long res = bpf_map_update_elem(&clients_map, &tcp->source, &new_client, BPF_NOEXIST);
-		if (res != 0)
+static __always_inline void
+cleanup_port_mappings(__be16 port)
+{
+	struct client_tupple *ct = bpf_map_lookup_elem(&port_client_tupple_map, &port);
+	if (ct != NULL)
+	{
+		if (bpf_map_delete_elem(&client_tupple_port_map, ct) != 0)
 		{
-			bpf_printk("ERROR: failed to save new client!");
-			return -1;
-		}
-
-		// Save client to backend mapping
-		res = bpf_map_update_elem(&client_port_be_map, &tcp->source, &be_idx, BPF_NOEXIST);
-		if (res != 0)
-		{
-			bpf_printk("ERROR: failed to save client -> backend mapping!");
-			return -1;
+			bpf_printk("FATAL: failed to cleanup client tupple -> port mapping!");
 		}
 	}
-	// Lookup backend config for existing client
-	else
+	if (bpf_map_delete_elem(&port_client_tupple_map, &port) != 0)
 	{
-		__be16 *be_idx = bpf_map_lookup_elem(&client_port_be_map, &client->port);
-		if (be_idx == NULL)
-		{
-			bpf_printk("FATAL: backend config not found [port: %d]!", client->port);
-			return -1;
-		}
-
-		be_cfg = bpf_map_lookup_elem(&be_cfg_map, be_idx);
-		if (be_cfg == NULL)
-		{
-			bpf_printk("FATAL: backend config not found [index: %d]!", *be_idx);
-			return -1;
-		}
+		bpf_printk("FATAL: failed to cleanup port -> client tupple mapping!");
 	}
-
-	// Update destination Port, IP and MAC
-	tcp->dest = bpf_ntohs(be_cfg->port);
-	ip->daddr = be_cfg->ip;
-	eth->h_dest[0] = be_cfg->mac[0]; // TODO: can we simplify this assignment?
-	eth->h_dest[1] = be_cfg->mac[1];
-	eth->h_dest[2] = be_cfg->mac[2];
-	eth->h_dest[3] = be_cfg->mac[3];
-	eth->h_dest[4] = be_cfg->mac[4];
-	eth->h_dest[5] = be_cfg->mac[5];
-
-	struct conn_track ct = {
-		.ts = bpf_ktime_get_ns(),
-	};
-	if (bpf_map_update_elem(&port_conn_track_map, &tcp->source, &ct, BPF_ANY) != 0)
+	if (bpf_map_delete_elem(&port_conn_track_map, &port) != 0)
 	{
-		bpf_printk("ERROR: failed to save client conn track!");
+		bpf_printk("FATAL: failed to cleanup port -> conn track mapping!");
+	}
+}
+
+static __always_inline int
+process_new_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, struct lb_cfg *lb_cfg, struct client_tupple ct)
+{
+	__be16 cport;
+	if (bpf_map_pop_elem(&ports, &cport) != 0)
+	{
+		bpf_printk("FATAL: failed to lookup port for new client!");
 		return -1;
 	}
+	bpf_printk("selected port: %d", cport);
+	if (bpf_map_update_elem(&client_tupple_port_map, &ct, &cport, BPF_NOEXIST) != 0)
+	{
+		bpf_printk("FATAL: failed to save client tupple -> new port mapping!");
+		push_back_port(cport);
+		return -1;
+	}
+	if (bpf_map_update_elem(&port_client_tupple_map, &cport, &ct, BPF_NOEXIST) != 0)
+	{
+		bpf_printk("FATAL: failed to save new port -> client tupple mapping!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	// Lookup backend for a new client
+	__be16 be_idx = bpf_ktime_get_ns() % lb_cfg->be_count;
+	struct server_cfg *be_cfg = bpf_map_lookup_elem(&be_cfg_map, &be_idx);
+	if (be_cfg == NULL)
+	{
+		bpf_printk("FATAL: backend config not found [index: %d]!", be_idx);
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	bpf_printk("selected Be: %d", be_idx);
+	if (bpf_map_update_elem(&port_be_cfg_map, &cport, be_cfg, BPF_NOEXIST) != 0)
+	{
+		bpf_printk("FATAL: failed to save new port -> backend config mapping!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	struct conn_track conn = {};
+	conn.ts = bpf_ktime_get_ns();
+	conn.client_fin = tcp->fin;
+	if (bpf_map_update_elem(&port_conn_track_map, &cport, &conn, BPF_NOEXIST) != 0)
+	{
+		bpf_printk("FATAL: failed to save new port -> connection tracking mapping!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	// Update source/destination Port, IP and MAC
+	tcp->source = bpf_ntohs(cport);
+	tcp->dest = bpf_ntohs(be_cfg->port);
+	ip->daddr = be_cfg->ip;
+	copy_mac(be_cfg->mac, eth->h_dest);
+	return 0;
+}
+
+static __always_inline int
+process_existing_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, struct lb_cfg *lb_cfg, __be16 cport)
+{
+	struct server_cfg *be_cfg = bpf_map_lookup_elem(&port_be_cfg_map, &cport);
+	if (be_cfg == NULL)
+	{
+		bpf_printk("FATAL: failed to lookup backend config for existing client!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	struct conn_track *conn = bpf_map_lookup_elem(&port_conn_track_map, &cport);
+	if (conn == NULL)
+	{
+		bpf_printk("FATAL: failed to lookup conn track for existing client!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	conn->ts = bpf_ktime_get_ns();
+	if (conn->client_fin == 0)
+	{
+		conn->client_fin = tcp->fin;
+	}
+	if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
+	{
+		bpf_printk("FATAL: failed to update conn track for existing client by client port!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	// Update source/destination Port, IP and MAC
+	tcp->source = bpf_ntohs(cport);
+	tcp->dest = bpf_ntohs(be_cfg->port);
+	ip->daddr = be_cfg->ip;
+	copy_mac(be_cfg->mac, eth->h_dest);
 	return 0;
 }
 
@@ -184,50 +224,45 @@ static __always_inline int
 process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 {
 	// TODO: remove it!
-	bpf_printk("Client TCP [%d / %d] bits: syn: %d, ack: %d, fin: %d, rst: %d", bpf_ntohs(tcp->seq), bpf_ntohs(tcp->ack_seq), tcp->syn, tcp->ack, tcp->fin, tcp->rst);
-	struct conn_track ct = {
-		.ts = bpf_ktime_get_ns(),
-	};
-	if (bpf_map_update_elem(&port_conn_track_map, &tcp->dest, &ct, BPF_ANY) != 0)
+	bpf_printk("BE TCP [%d / %d]", bpf_ntohs(tcp->source), bpf_ntohs(tcp->dest));
+
+	__be16 cport = bpf_ntohs(tcp->dest);
+	struct client_tupple *ct = bpf_map_lookup_elem(&port_client_tupple_map, &cport);
+	if (ct == NULL)
 	{
-		bpf_printk("ERROR: failed to save backend conn track!");
+		bpf_printk("FATAL: failed to lookup existing client by destination port!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
 		return -1;
 	}
-
-	// 1. Lookup client by port
-	// 2. Update destination IP and MAC
-	struct server_cfg *client = bpf_map_lookup_elem(&clients_map, &tcp->dest);
-	if (client == NULL)
+	struct conn_track *conn = bpf_map_lookup_elem(&port_conn_track_map, &cport);
+	if (conn == NULL)
 	{
-		bpf_printk("FATAL: client not found [port: %d]!", tcp->dest);
+		bpf_printk("FATAL: failed to lookup conn track by destination port!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+		return -1;
+	}
+	conn->ts = bpf_ktime_get_ns();
+	if (conn->be_fin == 0)
+	{
+		conn->be_fin = tcp->fin;
+	}
+	if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
+	{
+		bpf_printk("FATAL: failed to update conn track mapping by destination port!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
 		return -1;
 	}
 
 	// Update destination IP and MAC
 	tcp->source = bpf_ntohs(port);
-	ip->daddr = client->ip;
-	eth->h_dest[0] = client->mac[0]; // TODO: can we simplify this assignment?
-	eth->h_dest[1] = client->mac[1];
-	eth->h_dest[2] = client->mac[2];
-	eth->h_dest[3] = client->mac[3];
-	eth->h_dest[4] = client->mac[4];
-	eth->h_dest[5] = client->mac[5];
+	tcp->dest = ct->port;
+	ip->daddr = ct->ip;
+	copy_mac(ct->mac, eth->h_dest);
+	bpf_printk("BE %d -> CL %d", bpf_ntohs(tcp->source), bpf_ntohs(tcp->dest));
 	return 0;
-}
-
-static __always_inline void
-set_lb_as_traffic_source(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, struct lb_cfg *lb_cfg)
-{
-	ip->saddr = lb_cfg->ip;
-	eth->h_source[0] = lb_cfg->mac[0];
-	eth->h_source[1] = lb_cfg->mac[1];
-	eth->h_source[2] = lb_cfg->mac[2];
-	eth->h_source[3] = lb_cfg->mac[3];
-	eth->h_source[4] = lb_cfg->mac[4];
-	eth->h_source[5] = lb_cfg->mac[5];
-
-	ip->check = iph_csum(ip);
-	tcp->check = tcp_csum(tcp);
 }
 
 SEC("xdp")
@@ -270,8 +305,9 @@ int xdp_load_balancer(struct xdp_md *ctx)
 
 	struct tcphdr *tcp = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
 
-	__be16 *be_idx = bpf_map_lookup_elem(&client_port_be_map, &tcp->dest); // if traffic source is backend
-	if (tcp->dest != bpf_ntohs(port) && be_idx == NULL)
+	__be16 uport = bpf_ntohs(tcp->dest);
+	struct client_tupple *ct = bpf_map_lookup_elem(&port_client_tupple_map, &uport); // if traffic source is backend
+	if (tcp->dest != bpf_ntohs(port) && ct == NULL)
 	{
 		bpf_printk("INFO: TCP segment port mistmatch, skipping [s: %d, d: %d]...", bpf_ntohs(tcp->source), bpf_ntohs(tcp->dest));
 		return XDP_PASS;
@@ -285,19 +321,37 @@ int xdp_load_balancer(struct xdp_md *ctx)
 		return XDP_ABORTED;
 	}
 
-	if (tcp->dest == bpf_ntohs(port)) // Traffic from clients
+	if (tcp->dest == bpf_ntohs(port))
 	{
-		if (process_client_traffic(eth, ip, tcp, lb_cfg) != 0)
+		struct client_tupple tupple = {
+			.ip = ip->saddr,
+			.port = tcp->source,
+		};
+		copy_mac(eth->h_source, tupple.mac);
+		__be16 *client_port = bpf_map_lookup_elem(&client_tupple_port_map, &tupple);
+		if (client_port == NULL)
+		{
+			if (process_new_client(eth, ip, tcp, lb_cfg, tupple) != 0)
+			{
+				return XDP_ABORTED;
+			}
+		}
+		else if (process_existing_client(eth, ip, tcp, lb_cfg, *client_port) != 0)
 		{
 			return XDP_ABORTED;
 		}
 	}
-	else if (process_be_traffic(eth, ip, tcp) != 0) // Traffic from backends
+	else if (process_be_traffic(eth, ip, tcp) != 0)
 	{
 		return XDP_ABORTED;
 	}
 
-	set_lb_as_traffic_source(eth, ip, tcp, lb_cfg);
+	ip->saddr = lb_cfg->ip;
+	copy_mac(lb_cfg->mac, eth->h_source);
+
+	ip->check = iph_csum(ip);
+	tcp->check = tcp_csum(tcp);
+
 	return XDP_TX;
 }
 

@@ -35,3 +35,14 @@ tcp_csum(struct tcphdr *tcp)
     unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)tcp, sizeof(struct tcphdr), 0);
     return csum_fold_helper(csum);
 }
+
+static __always_inline void
+copy_mac(unsigned char src[ETH_ALEN], unsigned char dst[ETH_ALEN])
+{
+    dst[0] = src[0];
+    dst[1] = src[1];
+    dst[2] = src[2];
+    dst[3] = src[3];
+    dst[4] = src[4];
+    dst[5] = src[5];
+}
