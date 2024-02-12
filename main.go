@@ -97,6 +97,7 @@ func main() {
 	defer ticker.Stop()
 	for range ticker.C {
 		printStat(&objs)
+		staleConnCleanup(&objs)
 	}
 }
 
@@ -204,4 +205,42 @@ func printStat(objs *bpfObjects) {
 			ipFromInt(beCfg.Ip), beCfg.Port, mac2String(beCfg.Mac), connDuration))
 	}
 	fmt.Printf("Stats:\n%s\n", stats.String())
+}
+
+func staleConnCleanup(objs *bpfObjects) {
+	fmt.Println("Starting cleanup ...")
+	iterator := objs.PortConnTrackMap.Iterate()
+	var port uint16
+	var conn bpfConnTrack
+	for iterator.Next(&port, &conn) {
+		if time.Duration(monotime.Now().Nanoseconds()-conn.Ts).Round(time.Second) > time.Minute {
+			fmt.Printf("Starting %d port cleanup ...\n", port)
+			var clientTupple bpfClientTupple
+			if err := objs.PortClientTuppleMap.Lookup(&port, &clientTupple); err != nil {
+				fmt.Printf("Failed to lookup port -> client tupple: %d\n", port)
+				continue
+			}
+			if err := objs.PortClientTuppleMap.Delete(&port); err != nil {
+				fmt.Printf("Failed to cleanup port -> client tupple: %d\n", port)
+				continue
+			}
+			if err := objs.ClientTupplePortMap.Delete(&clientTupple); err != nil {
+				fmt.Printf("Failed to cleanup client tupple -> port: %d\n", port)
+				continue
+			}
+			if err := objs.PortBeCfgMap.Delete(&port); err != nil {
+				fmt.Printf("Failed to cleanup port -> be config: %d\n", port)
+				continue
+			}
+			if err := objs.PortConnTrackMap.Delete(&port); err != nil {
+				fmt.Printf("Failed to cleanup port -> conn track: %d\n", port)
+				continue
+			}
+			if err := objs.Ports.Put(nil, &port); err != nil {
+				fmt.Printf("Failed to push back port: %d\n", port)
+				continue
+			}
+			fmt.Printf("%d port cleanup finished!\n", port)
+		}
+	}
 }
