@@ -210,6 +210,12 @@ process_existing_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp
 		cleanup_port_mappings(cport);
 		push_back_port(cport);
 	}
+	else if (tcp->rst == 1)
+	{
+		bpf_printk("WARN: client session reset!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+	}
 	else
 	{
 		conn->ts = bpf_ktime_get_ns();
@@ -259,6 +265,12 @@ process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 	else if (conn->be_fin == 1 && conn->client_fin == 1 && tcp->ack == 1)
 	{
 		bpf_printk("INFO: session finished!");
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
+	}
+	else if (tcp->rst == 1)
+	{
+		bpf_printk("WARN: backend session reset!");
 		cleanup_port_mappings(cport);
 		push_back_port(cport);
 	}
