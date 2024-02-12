@@ -3,7 +3,7 @@
 #include "xdp_lb_kern.h"
 
 #define BE_MAX_ENTRIES 8
-#define CLIENT_MAX_ENTRIES 64512 // < 1023 and <= 65535 (65535 - 1023 = 64512)
+#define CLIENT_MAX_ENTRIES 64512 // > 1023 and <= 65535 (65535 - 1023 = 64512)
 
 struct
 {
@@ -79,6 +79,7 @@ struct conn_track
 	long ts;		  // latest connection activity timestamp
 	__u16 client_fin; // client TCP FIN indicator
 	__u16 be_fin;	  // backend TCP FIN indicator
+	__be32 last_seq;  // last and biggest SEQ number
 };
 
 struct
@@ -127,6 +128,26 @@ cleanup_port_mappings(__be16 port)
 }
 
 static __always_inline int
+finish_session(struct tcphdr *tcp, struct conn_track *conn)
+{
+	if (tcp->rst == 1)
+	{
+		bpf_printk("WARN: client session reset!");
+		return 1;
+	}
+	if (conn != NULL && conn->be_fin == 1 && conn->client_fin == 1 && tcp->ack == 1)
+	{
+		return 1;
+	}
+	if (conn != NULL && ((conn->be_fin == 1 && conn->client_fin == 0) || (conn->be_fin == 0 && conn->client_fin == 1)) && tcp->fin == 0 && tcp->ack == 1 && conn->last_seq >= tcp->seq)
+	{
+		bpf_printk("WARN: out of order detected!");
+		return 1;
+	}
+	return 0;
+}
+
+static __always_inline int
 process_new_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, struct lb_cfg *lb_cfg, struct client_tupple ct)
 {
 	__be16 cport;
@@ -135,7 +156,6 @@ process_new_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, str
 		bpf_printk("FATAL: failed to lookup port for new client!");
 		return -1;
 	}
-	bpf_printk("selected port: %d", cport);
 	if (bpf_map_update_elem(&client_tupple_port_map, &ct, &cport, BPF_NOEXIST) != 0)
 	{
 		bpf_printk("FATAL: failed to save client tupple -> new port mapping!");
@@ -159,7 +179,6 @@ process_new_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, str
 		push_back_port(cport);
 		return -1;
 	}
-	bpf_printk("selected Be: %d", be_idx);
 	if (bpf_map_update_elem(&port_be_cfg_map, &cport, be_cfg, BPF_NOEXIST) != 0)
 	{
 		bpf_printk("FATAL: failed to save new port -> backend config mapping!");
@@ -170,6 +189,7 @@ process_new_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp, str
 	struct conn_track conn = {};
 	conn.ts = bpf_ktime_get_ns();
 	conn.client_fin = tcp->fin;
+	conn.last_seq = tcp->seq;
 	if (bpf_map_update_elem(&port_conn_track_map, &cport, &conn, BPF_NOEXIST) != 0)
 	{
 		bpf_printk("FATAL: failed to save new port -> connection tracking mapping!");
@@ -204,17 +224,11 @@ process_existing_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp
 		push_back_port(cport);
 		return -1;
 	}
-	else if (conn->be_fin == 1 && conn->client_fin == 1 && tcp->ack == 1)
+	else if (finish_session(tcp, conn) == 1)
 	{
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
 		bpf_printk("INFO: session finished!");
-		cleanup_port_mappings(cport);
-		push_back_port(cport);
-	}
-	else if (tcp->rst == 1)
-	{
-		bpf_printk("WARN: client session reset!");
-		cleanup_port_mappings(cport);
-		push_back_port(cport);
 	}
 	else
 	{
@@ -222,6 +236,10 @@ process_existing_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp
 		if (conn->client_fin == 0)
 		{
 			conn->client_fin = tcp->fin;
+		}
+		if (conn->last_seq < tcp->seq)
+		{
+			conn->last_seq = tcp->seq;
 		}
 		if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
 		{
@@ -242,9 +260,6 @@ process_existing_client(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp
 static __always_inline int
 process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 {
-	// TODO: remove it!
-	bpf_printk("BE TCP [%d / %d]", bpf_ntohs(tcp->source), bpf_ntohs(tcp->dest));
-
 	__be16 cport = bpf_ntohs(tcp->dest);
 	struct client_tupple *ct = bpf_map_lookup_elem(&port_client_tupple_map, &cport);
 	if (ct == NULL)
@@ -262,17 +277,11 @@ process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 		push_back_port(cport);
 		return -1;
 	}
-	else if (conn->be_fin == 1 && conn->client_fin == 1 && tcp->ack == 1)
+	else if (finish_session(tcp, conn) == 1)
 	{
+		cleanup_port_mappings(cport);
+		push_back_port(cport);
 		bpf_printk("INFO: session finished!");
-		cleanup_port_mappings(cport);
-		push_back_port(cport);
-	}
-	else if (tcp->rst == 1)
-	{
-		bpf_printk("WARN: backend session reset!");
-		cleanup_port_mappings(cport);
-		push_back_port(cport);
 	}
 	else
 	{
@@ -280,6 +289,10 @@ process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 		if (conn->be_fin == 0)
 		{
 			conn->be_fin = tcp->fin;
+		}
+		if (conn->last_seq < tcp->seq)
+		{
+			conn->last_seq = tcp->seq;
 		}
 		if (bpf_map_update_elem(&port_conn_track_map, &cport, conn, BPF_EXIST) != 0)
 		{
@@ -295,7 +308,6 @@ process_be_traffic(struct ethhdr *eth, struct iphdr *ip, struct tcphdr *tcp)
 	tcp->dest = ct->port;
 	ip->daddr = ct->ip;
 	copy_mac(ct->mac, eth->h_dest);
-	bpf_printk("BE %d -> CL %d", bpf_ntohs(tcp->source), bpf_ntohs(tcp->dest));
 	return 0;
 }
 
@@ -339,8 +351,8 @@ int xdp_load_balancer(struct xdp_md *ctx)
 
 	struct tcphdr *tcp = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
 
-	__be16 uport = bpf_ntohs(tcp->dest);
-	struct client_tupple *ct = bpf_map_lookup_elem(&port_client_tupple_map, &uport); // if traffic source is backend
+	__be16 dport = bpf_ntohs(tcp->dest);
+	struct client_tupple *ct = bpf_map_lookup_elem(&port_client_tupple_map, &dport); // if traffic source is backend
 	if (tcp->dest != bpf_ntohs(port) && ct == NULL)
 	{
 		bpf_printk("INFO: TCP segment port mistmatch, skipping [s: %d, d: %d]...", bpf_ntohs(tcp->source), bpf_ntohs(tcp->dest));
