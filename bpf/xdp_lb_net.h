@@ -12,7 +12,7 @@
 
 struct
 {
-    __uint(type, BPF_MAP_TYPE_STACK);
+    __uint(type, BPF_MAP_TYPE_QUEUE);
     __uint(max_entries, CLIENT_MAX_ENTRIES);
     __type(value, __be16);
 } ports SEC(".maps");
