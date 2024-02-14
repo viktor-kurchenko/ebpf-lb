@@ -2,6 +2,7 @@ TARGET = bpf/app
 BPF_APP = xdp_lb
 INTERFACE = docker0
 
+LB_PORT = 8080
 BE_PORT = 8000
 
 BPF_C = ${TARGET:=.c}
@@ -35,15 +36,7 @@ run: build
 	sudo go run . $(INTERFACE)
 
 infra-run:
-	echo "Starting BE-1 ..."
-	docker run -e HTTP_PORT=$(BE_PORT) -h be-1 --name be-1 --rm -d -t mendhak/http-https-echo:31
-	BE1_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' be-1)
-	echo "Starting BE-2 ..."
-	docker run -e HTTP_PORT=$(BE_PORT) -h be-2 --name be-2 --rm -d -t mendhak/http-https-echo:31
-	BE2_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' be-2)
-	echo "Starting clients ..."
-	docker run --name cl-1 --rm -d -it nicolaka/netshoot /bin/bash
-	docker run --name cl-2 --rm -d -it nicolaka/netshoot /bin/bash
+	./scripts/start_docker_infra.sh $(INTERFACE) $(LB_PORT) $(BE_PORT)
 
 infra-stop:
-	docker stop be-1 be-2 cl-1 cl-2 || true
+	./scripts/stop_docker_infra.sh

@@ -11,6 +11,7 @@
 bpf_bpfeb.go
 bpf_bpfel.go
 ebpf
+config.yaml
 
 # Test binary, built with `go test -c`
 *.test
